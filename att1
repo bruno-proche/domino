@@ -1,0 +1,486 @@
+
+#include <iostream>
+#include <string>
+#include <cstdlib>
+#include <ctime>
+using namespace std;
+
+
+struct Peca {
+    int ladoEsq;
+    int ladoDir;
+};
+
+
+struct NoPeca {
+    Peca    peca;
+    NoPeca* prox;          
+};
+
+struct ListaPecas {
+    NoPeca* inicio;       
+    int     tamanho;
+};
+
+// --- Lista duplamente encadeada: usada na MESA ---
+struct NoMesa {
+    Peca    peca;          // guardada já na orientação em que foi jogada
+    NoMesa* ant;           // nó à esquerda
+    NoMesa* prox;          // nó à direita
+};
+
+struct Mesa {
+    NoMesa* esquerda;      
+    NoMesa* direita;       
+    int     qtd;
+};
+
+struct Jogador {
+    string     nome;
+    ListaPecas mao;
+    int        pontos;  
+};
+
+
+struct Jogo {
+    Jogador*   jogadores;      // array dinâmico com numJogadores posições
+    int        numJogadores;   // 2 a 4
+    Mesa       mesa;
+    ListaPecas monte;          // fica vazio com 4 jogadores
+    int        vez;            // índice do jogador da vez
+    int        passesSeguidos; // se chegar a numJogadores, o jogo trancou
+};
+
+
+int lerinteiro(const string& msg, int min, int max) {
+    string linha;
+    while (true) {
+        cout << msg;
+        if (!getline(cin, linha)) {          
+            cout << endl << "Entrada encerrada." << endl;
+            exit(0);
+        }
+        char* fim;
+        long v = strtol(linha.c_str(), &fim, 10);
+        if (fim != linha.c_str() && *fim == '\0' && v >= min && v <= max)
+            return (int)v;
+        cout << "Entrada inválida. Digite um número entre "
+             << min << " e " << max << "." << endl;
+    }
+}
+
+void esperarenter(const string& msg) {
+    string lixo;
+    cout << msg;
+    if (!getline(cin, lixo)) exit(0);
+}
+
+
+void ocultartela() {
+    for (int i = 0; i < 40; i++) cout << endl;
+}
+
+
+void inicializarlista(ListaPecas* l) {
+    l->inicio = nullptr;
+    l->tamanho = 0;
+}
+
+void inserirpeca(ListaPecas* l, Peca p) {
+    NoPeca* novo = new NoPeca;
+    novo->peca = p;
+    novo->prox = l->inicio;
+    l->inicio = novo;
+    l->tamanho++;
+}
+
+// Remove o nó da posição idx (0 = primeiro) e devolve a peça em *out
+bool removerpecaporindice(ListaPecas* l, int indice, Peca* saida) {
+    if (indice < 0 || indice >= l->tamanho) return false;
+
+    NoPeca* anterior = nullptr;
+    NoPeca* atual = l->inicio;
+    for (int i = 0; i < indice; i++) {
+        anterior = atual;
+        atual = atual->prox;
+    }
+
+    if (anterior == nullptr) l->inicio = atual->prox;   // era o primeiro
+    else anterior->prox = atual->prox;               // religa a lista
+
+    *saida = atual->peca;
+    delete atual;
+    l->tamanho--;
+    return true;
+}
+
+// Devolve a peça da posição indice (sem remover)
+Peca obterpeca(const ListaPecas* l, int indice) {
+    NoPeca* atual = l->inicio;
+    for (int i = 0; i < indice; i++) atual = atual->prox;
+    return atual->peca;
+}
+
+void liberarlista(ListaPecas* l) {
+    NoPeca* atual = l->inicio;
+    while (atual != nullptr) {
+        NoPeca* proximo = atual->prox;   // guarda antes de apagar
+        delete atual;
+        atual = proximo;
+    }
+    l->inicio = nullptr;
+    l->tamanho = 0;
+}
+
+int somalista(const ListaPecas* l) {
+    int soma = 0;
+    for (NoPeca* a = l->inicio; a != nullptr; a = a->prox)
+        soma += a->peca.ladoEsq + a->peca.ladoDir;
+    return soma;
+}
+
+// Cria as 28 peças (0|0 até 6|6) dentro do monte
+void criarmonte(ListaPecas* monte) {
+    inicializarlista(monte);
+    for (int i = 0; i <= 6; i++)
+        for (int j = i; j <= 6; j++)
+            inserirpeca(monte, Peca{i, j});
+}
+
+// Tira uma peça aleatória de 'origem' e coloca em 'destino'
+bool compraraleatoria(ListaPecas* origem, ListaPecas* destino) {
+    if (origem->tamanho == 0) return false;
+    int indice = rand() % origem->tamanho;
+    Peca p;
+    removerpecaporindice(origem, indice, &p);
+    inserirpeca(destino, p);
+    return true;
+}
+
+
+void inicializarmesa(Mesa* m) {
+    m->esquerda = nullptr;
+    m->direita = nullptr;
+    m->qtd = 0;
+}
+
+// A peça encaixa na ponta esquerda? (mesa vazia: sempre)
+bool encaixaesquerda(const Mesa* m, Peca p) {
+    if (m->qtd == 0) return true;
+    int ponta = m->esquerda->peca.ladoEsq;
+    return p.ladoEsq == ponta || p.ladoDir == ponta;
+}
+
+bool encaixadireita(const Mesa* m, Peca p) {
+    if (m->qtd == 0) return true;
+    int ponta = m->direita->peca.ladoDir;
+    return p.ladoEsq == ponta || p.ladoDir == ponta;
+}
+
+bool podejogar(const Mesa* m, Peca p) {
+    return encaixaesquerda(m, p) || encaixadireita(m, p);
+}
+
+// Existe alguma peça da mão que possa ser jogada?
+bool temjogada(const Mesa* m, const ListaPecas* mao) {
+    for (NoPeca* a = mao->inicio; a != nullptr; a = a->prox)
+        if (podejogar(m, a->peca)) return true;
+    return false;
+}
+
+// Coloca a peça na ponta escolhida, virando-a se necessário.
+// Devolve false (sem alterar nada) se a peça não encaixar.
+bool jogarnamesa(Mesa* m, Peca p, bool esquerda) {
+    if (esquerda ? !encaixaesquerda(m, p) : !encaixadireita(m, p))
+        return false;
+
+    NoMesa* novo = new NoMesa;
+    novo->ant = nullptr;
+    novo->prox = nullptr;
+
+    if (m->qtd == 0) {
+        novo->peca = p;
+        m->esquerda = novo;
+        m->direita = novo;
+    } else if (esquerda) {
+        // o lado DIREITO da nova peça tem que tocar a ponta esquerda
+        if (p.ladoDir != m->esquerda->peca.ladoEsq) {
+            int troca = p.ladoEsq; p.ladoEsq = p.ladoDir; p.ladoDir = troca;
+        }
+        novo->peca = p;
+        novo->prox = m->esquerda;
+        m->esquerda->ant = novo;
+        m->esquerda = novo;
+    } else {
+        // o lado ESQUERDO da nova peça tem que tocar a ponta direita
+        if (p.ladoEsq != m->direita->peca.ladoDir) {
+            int troca = p.ladoEsq; p.ladoEsq = p.ladoDir; p.ladoDir = troca;
+        }
+        novo->peca = p;
+        novo->ant = m->direita;
+        m->direita->prox = novo;
+        m->direita = novo;
+    }
+    m->qtd++;
+    return true;
+}
+
+void liberarmesa(Mesa* m) {
+    NoMesa* atual = m->esquerda;
+    while (atual != nullptr) {
+        NoMesa* proximo = atual->prox;
+        delete atual;
+        atual = proximo;
+    }
+    inicializarmesa(m);
+}
+
+void mostrarmesa(const Mesa* m) {
+    cout << "MESA: ";
+    if (m->qtd == 0) {
+        cout << "(vazia)" << endl;
+        return;
+    }
+    for (NoMesa* a = m->esquerda; a != nullptr; a = a->prox)
+        cout << "[" << a->peca.ladoEsq << "|" << a->peca.ladoDir << "]";
+    cout << endl;
+}
+
+// Mostra a mão numerada; peças jogáveis ganham um '*'
+void mostrarmao(const Mesa* m, const ListaPecas* mao) {
+    cout << "SUA MÃO (* = pode jogar): " << endl;
+    int i = 1;
+    for (NoPeca* a = mao->inicio; a != nullptr; a = a->prox, i++) {
+        cout << "  " << i << ": [" << a->peca.ladoEsq << "|"
+             << a->peca.ladoDir << "]" << (podejogar(m, a->peca) ? " *" : "") << endl;
+    }
+}
+
+
+Jogador* criarjogadores(int n) {
+    Jogador* js = new Jogador[n];
+    for (int i = 0; i < n; i++) {
+        js[i].nome = "Jogador " + to_string(i + 1);   
+        inicializarlista(&js[i].mao);
+        js[i].pontos = 0;
+    }
+    return js;
+}
+
+void inserirnomes(Jogador* js, int n) {
+    for (int i = 0; i < n; i++) {
+        cout << "Digite o nome do jogador " << i + 1 << ": ";
+        string nome;
+        if (!getline(cin, nome)) exit(0);
+        if (!nome.empty()) js[i].nome = nome;
+    }
+}
+
+void mostrarnomes(const Jogo* jg) {
+    cout << "Jogadores (" << jg->numJogadores << "): ";
+    for (int i = 0; i < jg->numJogadores; i++)
+        cout << jg->jogadores[i].nome << " (" << jg->jogadores[i].pontos << " pts)  ";
+    cout << endl << endl;
+}
+
+// Monte novo com 28 peças + 7 para cada jogador + mesa vazia
+void prepararpartida(Jogo* jg) {
+    criarmonte(&jg->monte);
+    inicializarmesa(&jg->mesa);
+    for (int i = 0; i < jg->numJogadores; i++) {
+        inicializarlista(&jg->jogadores[i].mao);
+        for (int k = 0; k < 7; k++)
+            compraraleatoria(&jg->monte, &jg->jogadores[i].mao);
+    }
+    jg->passesSeguidos = 0;
+}
+
+// Libera TUDO que a partida alocou (menos o array de jogadores,
+// que continua existindo entre as rodadas)
+void finalizarpartida(Jogo* jg) {
+    for (int i = 0; i < jg->numJogadores; i++)
+    liberarlista(&jg->jogadores[i].mao);
+    liberarlista(&jg->monte);
+    liberarmesa(&jg->mesa);
+}
+
+// Executa a vez do jogador atual. Devolve true se jogou uma peça,
+// false se passou a vez.
+bool jogarturno(Jogo* jg) {
+    Jogador* j = &jg->jogadores[jg->vez];
+
+    ocultartela();
+    cout << "=== Vez de " << j->nome << " ===" << endl;
+    esperarenter("(Só " + j->nome + " deve olhar!) Pressione ENTER para ver sua mão...");
+
+    mostrarmesa(&jg->mesa);
+    cout << "Monte: " << jg->monte.tamanho << " peça(s)" << endl << endl;
+
+    // Sem peça jogável: compra até achar uma ou até o monte acabar
+    if (!temjogada(&jg->mesa, &j->mao)) {
+        mostrarmao(&jg->mesa, &j->mao);
+        while (!temjogada(&jg->mesa, &j->mao) && jg->monte.tamanho > 0) {
+            compraraleatoria(&jg->monte, &j->mao);   // nova peça fica no início
+            Peca c = j->mao.inicio->peca;
+            cout << "Sem jogada! " << j->nome << " comprou [" << c.ladoEsq << "|"
+                 << c.ladoDir << "] (monte: " << jg->monte.tamanho << ")" << endl;
+        }
+        if (!temjogada(&jg->mesa, &j->mao)) {
+            cout << j->nome << " não pode jogar e passa a vez." << endl;
+            jg->passesSeguidos++;
+            esperarenter("ENTER para continuar...");
+            return false;
+        }
+        cout << endl;
+    }
+
+    mostrarmao(&jg->mesa, &j->mao);
+
+    // Escolha da peça (só aceita peça que encaixa)
+    int indice;
+    Peca p;
+    while (true) {
+        indice = lerinteiro("Escolha a peça (1-" + to_string(j->mao.tamanho) + "): ",
+                            1, j->mao.tamanho) - 1;
+        p = obterpeca(&j->mao, indice);
+        if (podejogar(&jg->mesa, p)) break;
+        cout << "Essa peça não encaixa em nenhuma ponta da mesa." << endl;
+    }
+
+    // Escolha do lado (só pergunta se as duas pontas servirem)
+    bool esquerda;
+    bool cabeE = encaixaesquerda(&jg->mesa, p);
+    bool cabeD = encaixadireita(&jg->mesa, p);
+    if (jg->mesa.qtd == 0)  esquerda = false;       // primeira peça: tanto faz
+    else if (cabeE && cabeD) esquerda = (lerinteiro("Lado (1-esquerda, 2-direita): ", 1, 2) == 1);
+    else                     esquerda = cabeE;      // só uma opção
+
+    removerpecaporindice(&j->mao, indice, &p);
+    jogarnamesa(&jg->mesa, p, esquerda);
+    jg->passesSeguidos = 0;
+
+    cout << j->nome << " jogou [" << p.ladoEsq << "|" << p.ladoDir << "]" << endl;
+    return true;
+}
+
+// Jogo trancado: vence a menor soma; soma igual = empate
+void resolvertrancado(Jogo* jg) {
+    cout << endl << "=== JOGO TRANCADO! ===" << endl;
+    int menor = -1;
+    for (int i = 0; i < jg->numJogadores; i++) {
+        int s = somalista(&jg->jogadores[i].mao);
+        cout << jg->jogadores[i].nome << ": " << s << " ponto(s) na mão" << endl;
+        if (menor == -1 || s < menor) menor = s;
+    }
+
+    int vencedores = 0;
+    for (int i = 0; i < jg->numJogadores; i++)
+        if (somalista(&jg->jogadores[i].mao) == menor) vencedores++;
+
+    if (vencedores == 1) cout << "Vencedor: ";
+    else                 cout << "EMPATE entre: ";
+    for (int i = 0; i < jg->numJogadores; i++) {
+        if (somalista(&jg->jogadores[i].mao) == menor) {
+            cout << jg->jogadores[i].nome << " ";
+            jg->jogadores[i].pontos++;
+        }
+    }
+    cout << endl;
+}
+
+// Uma rodada completa, do início ao fim
+void jogarpartida(Jogo* jg, int primeiro) {
+    prepararpartida(jg);
+    jg->vez = primeiro;
+
+    bool fim = false;
+    while (!fim) {
+        bool jogou = jogarturno(jg);
+        Jogador* j = &jg->jogadores[jg->vez];
+
+        if (jogou && j->mao.tamanho == 0) {            // bateu!
+            mostrarmesa(&jg->mesa);
+            cout << endl << "*** " << j->nome << " jogou a última peça e VENCEU! ***" << endl;
+            j->pontos++;
+            fim = true;
+        } else if (jg->passesSeguidos >= jg->numJogadores) {   // todos passaram
+            mostrarmesa(&jg->mesa);
+            resolvertrancado(jg);
+            fim = true;
+        } else {
+            jg->vez = (jg->vez + 1) % jg->numJogadores;
+        }
+    }
+    finalizarpartida(jg);   // libera mãos, monte e mesa
+}
+
+void mostrarplacar(const Jogo* jg) {
+    cout << endl << "--- PLACAR ---" << endl;
+    for (int i = 0; i < jg->numJogadores; i++)
+        cout << jg->jogadores[i].nome << ": " << jg->jogadores[i].pontos << endl;
+    cout << endl;
+}
+
+
+void menu() {
+    cout << "=============================" << endl;
+    cout << "Bem-vindo ao Jogo de Dominó!" << endl;
+    cout << "=============================" << endl;
+    cout << "1. Jogar" << endl;
+    cout << "2. Selecionar número de jogadores" << endl;
+    cout << "3. Sair" << endl;
+}
+
+// Troca a quantidade de jogadores: libera o array antigo e cria o novo
+void alterarjogadores(Jogo* jg) {
+    jg->numJogadores = lerinteiro("Digite o número de jogadores (2 a 4): ", 2, 4);
+    delete[] jg->jogadores;
+    jg->jogadores = criarjogadores(jg->numJogadores);
+    inserirnomes(jg->jogadores, jg->numJogadores);
+}
+
+int main() {
+    srand(time(NULL));
+
+    Jogo jogo;
+    jogo.numJogadores = 2;
+    jogo.jogadores = criarjogadores(jogo.numJogadores);
+    inicializarlista(&jogo.monte);
+    inicializarmesa(&jogo.mesa);
+    jogo.vez = 0;
+    jogo.passesSeguidos = 0;
+
+    int primeiro = 0;   // quem começa a rodada (gira a cada rodada)
+
+    while (true) {
+        mostrarnomes(&jogo);
+        menu();
+        int opcao = lerinteiro("Por favor, selecione uma opção: ", 1, 3);
+
+        if (opcao == 1) {
+            bool continuar = true;
+            while (continuar) {
+                jogarpartida(&jogo, primeiro);
+                primeiro = (primeiro + 1) % jogo.numJogadores;
+                mostrarplacar(&jogo);
+
+                if (lerinteiro("Jogar outra rodada? (1-Sim, 2-Não): ", 1, 2) == 2) {
+                    continuar = false;
+                } else if (lerinteiro("Alterar a quantidade de jogadores? (1-Sim, 2-Não): ", 1, 2) == 1) {
+                    alterarjogadores(&jogo);
+                    primeiro = 0;
+                }
+            }
+        } else if (opcao == 2) {
+            alterarjogadores(&jogo);
+            primeiro = 0;
+        } else {
+            cout << "Saindo do jogo. Até logo!" << endl;
+            break;
+        }
+    }
+
+    delete[] jogo.jogadores;   // evita vazamento ao sair
+    jogo.jogadores = NULL;
+    return 0;
+}
